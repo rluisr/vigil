@@ -22,7 +22,7 @@ Multi-cloud SLO guardian that illuminates your error budget health across monito
 
 ### Get a list of SLOs to be adjusted that have never been below 99% in 30 days
 ```bash
-$ vigil --project your-gcp-project-id --error-budget-threshold 0.99 --window 30d
+$ vigil --project your-gcp-project-id --error-budget-threshold 0.99 --window 720h
 ```
 
 ## Install
