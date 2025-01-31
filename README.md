@@ -1,7 +1,7 @@
 Vigil
 =====
 
-Multi-cloud SLO guardian that illuminates your error budget health across monitoring platforms.
+Identifies underutilized service-level objectives in GCP environments by detecting SLOs that consistently maintain error budget thresholds,generating actionable Excel reports with historical performance trends and optimization recommendations.
 
 ![screenshot](./assets/excel.png)
 
