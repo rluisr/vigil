@@ -6,8 +6,9 @@ Multi-cloud SLO guardian that illuminates your error budget health across monito
 ![screenshot](./assets/excel.png)
 
 ## Features
-- Multi-cloud SLO monitoring (currently supports Google Cloud Monitoring)
+- Get a list of SLOs to be adjusted that have never been below n% in m days
 - Excel report generation
+- Multi-cloud SLO monitoring (currently supports Google Cloud Monitoring)
 
 ## Arguments
 ```
