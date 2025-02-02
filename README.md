@@ -7,6 +7,7 @@ Identifies underutilized service-level objectives in GCP environments by detecti
 
 ## Features
 - Obtain a list of SLOs for which the error budget has never been below n% for m days and for which the adjustment is to be made.
+- Obtain a list of SLOs for which 50% of the total window has a negative error budget.
 - Excel report generation
 - Multi-cloud SLO monitoring (currently supports Google Cloud Monitoring)
 
