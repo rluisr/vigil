@@ -67,7 +67,7 @@ func main() {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			data, err := ProcessSLO(ctx, vigil, s)
+			data, err := processSLO(ctx, vigil, s)
 			if err != nil {
 				errChan <- fmt.Errorf("failed to process SLO %s: %w", s.DisplayName, err)
 				return
@@ -107,7 +107,7 @@ func main() {
 	log.Println("Report has been written to slo_report.xlsx")
 }
 
-func ProcessSLO(ctx context.Context, client Vigil, slo *model.SLO) (map[string]*model.SLOData, error) {
+func processSLO(ctx context.Context, client Vigil, slo *model.SLO) (map[string]*model.SLOData, error) {
 	var (
 		data = make(map[string]*model.SLOData)
 	)
