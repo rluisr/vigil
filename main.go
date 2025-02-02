@@ -172,7 +172,6 @@ func generateExcelReport(data map[string]*model.SLOData) {
 		}
 	}()
 
-	// スタイル作成をヘルパー関数化
 	boldStyle := createStyle(f, &excelize.Font{Bold: true})
 	highlightStyle := createStyle(f, &excelize.Font{Bold: true}, excelize.Fill{
 		Type:    "pattern",
@@ -190,7 +189,7 @@ func generateExcelReport(data map[string]*model.SLOData) {
 		"F-I": 50,
 	})
 	setSheetView(f)
-	setCellWithStyle(f, "A1", fmt.Sprintf("SLO Report for %s\nList of SLOs that have never been below %g%% in %g days...",
+	setCellWithStyle(f, "A1", fmt.Sprintf("SLO Report for %s\nList of SLOs that have never been below %g%% in %g days and 50%% of the total window has a negative error budget",
 		*gcpProjectID, *errorBudgetThreshold*100, window.Hours()/24), descriptionStyle)
 	setCellWithStyle(f, "C2", "New SLO", highlightStyle)
 
@@ -199,7 +198,6 @@ func generateExcelReport(data map[string]*model.SLOData) {
 		setCellWithStyle(f, fmt.Sprintf("%c2", 'A'+i), h, boldStyle)
 	}
 
-	// データ設定
 	row := 3
 	for k, v := range data {
 		if v.Flag {
@@ -247,7 +245,7 @@ func setSheetView(f *excelize.File) {
 
 func setColWidth(f *excelize.File, sheet string, columns map[string]float64) {
 	for rangeStr, width := range columns {
-		// 範囲指定（例: "B-E"）を開始列と終了列に分割
+		// split range e.g B-E
 		parts := strings.SplitN(rangeStr, "-", 2)
 		startCol := parts[0]
 		endCol := startCol
