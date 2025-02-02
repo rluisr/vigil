@@ -17,8 +17,6 @@ import (
 	"github.com/rluisr/vigil/utils"
 )
 
-// TODO: ずっとマイナスになってるものも対象にする
-
 const maxConcurrency = 16
 
 var (
