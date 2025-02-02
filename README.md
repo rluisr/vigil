@@ -22,7 +22,9 @@
       target window. use "h" suffix (default 720h0m0s)
 ```
 
-### Get a list of SLOs to be adjusted that have never been below 99% in 30 days
+### Error budget has never dropped below 99% in 30 days SLO
+also 50% of the total window has a negative error budget.
+
 ```bash
 $ vigil --cloud gcp --gcp-project your-gcp-project-id --error-budget-threshold 0.99 --window 720h
 ```
