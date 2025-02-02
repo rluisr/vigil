@@ -3,6 +3,10 @@ package utils
 import "math"
 
 func GetMinAvgErrorBudget(points []float64) (minValue float64, avgValue float64) {
+	if len(points) == 0 {
+		return 0, 0
+	}
+
 	minValue = math.Inf(1)
 	avgValue = 0.0
 	for _, point := range points {
@@ -15,6 +19,10 @@ func GetMinAvgErrorBudget(points []float64) (minValue float64, avgValue float64)
 }
 
 func IsPercentNegative(data []float64, percent float64) bool {
+	if percent < 0 || percent > 1 {
+		return false
+	}
+
 	if len(data) == 0 {
 		return false
 	}
