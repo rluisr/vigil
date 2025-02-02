@@ -1,6 +1,6 @@
 ![og](./assets/og.png)
 
-<strong>Vigil</strong> identifies underutilized service-level objectives in GCP environments by detecting SLOs that consistently maintain error budget thresholds,generating actionable Excel reports with historical performance trends and optimization recommendations.
+<strong>Vigil</strong> identifies underutilized service-level objectives by detecting SLOs that consistently maintain error budget thresholds,generating actionable Excel reports with historical performance trends and optimization recommendations.
 
 ## Features
 - Obtain a list of SLOs for which the error budget has never been below n% for m days and for which the adjustment is to be made.
