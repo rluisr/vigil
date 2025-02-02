@@ -2,154 +2,156 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
-	"math"
 	"strings"
 	"sync"
 	"time"
 
-	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
-	monitoringpb "cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"github.com/schollz/progressbar/v3"
 	"github.com/xuri/excelize/v2"
-	"google.golang.org/api/iterator"
-	"google.golang.org/api/option"
-	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/rluisr/vigil/gcp"
+	"github.com/rluisr/vigil/model"
+	"github.com/rluisr/vigil/utils"
 )
+
+// TODO: ずっとマイナスになってるものも対象にする
 
 const maxConcurrency = 16
 
 var (
-	projectID            = flag.String("project", "", "project id")
+	cloudProvider        = flag.String("cloud", string(model.CloudProviderGCP), "cloud provider. gcp or datadog(WIP)")
+	gcpProjectID         = flag.String("gcp-project", "", "project id")
 	errorBudgetThreshold = flag.Float64("error-budget-threshold", 0.9, "error budget threshold. 0 ~ 1") // Error budget threshold
 	window               = flag.Duration("window", 720*time.Hour, "target window. use \"h\" suffix")
-	jobCh                = make(chan *monitoringpb.ServiceLevelObjective, 100000)
-	resultCh             = make(chan jobResult, 100000)
-	errCh                = make(chan error, 1)
-	barMutex             sync.Mutex
-	dataMutex            sync.RWMutex
+	warnMessages         = []string{}
+	warnMutex            sync.Mutex
 )
-
-type jobResult struct {
-	key        string
-	targetSLO  float64
-	goodQuery  string
-	totalQuery string
-	min        float64
-	avg        float64
-	flag       bool
-}
-
-type sloData struct {
-	Flag       bool
-	SLO        float64
-	GoodQuery  string
-	TotalQuery string
-	Avg        float64
-	Min        float64
-}
 
 func main() {
 	flag.Parse()
 	validateFlags()
 
 	ctx := context.Background()
-	monitoringClient := createClient(ctx, monitoring.NewServiceMonitoringClient)
-	metricClient := createClient(ctx, monitoring.NewMetricClient)
 
-	slos := listSLOs(ctx, monitoringClient)
-	data := processSLOs(ctx, metricClient, slos)
+	client, err := gcp.NewClient(ctx, *gcpProjectID, *errorBudgetThreshold, *window)
+	if err != nil {
+		log.Panicf("Failed to create client: %v", err)
+	}
+	defer client.MonitoringClient.Close()
+	defer client.MetricClient.Close()
 
-	generateExcelReport(data)
+	var vigil Vigil = client
+
+	log.Println("Getting SLOs...")
+
+	slos, err := vigil.GetSLOs(ctx)
+	if err != nil {
+		log.Panicf("Failed to list SLOs: %v", err)
+	}
+
+	bar := progressbar.Default(int64(len(slos)))
+
+	var sloData = make(map[string]*model.SLOData)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxConcurrency)
+	errChan := make(chan error, len(slos))
+
+	for _, slo := range slos {
+		wg.Add(1)
+
+		sem <- struct{}{}
+
+		go func(s *model.SLO) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			data, err := ProcessSLO(ctx, vigil, s)
+			if err != nil {
+				errChan <- fmt.Errorf("failed to process SLO %s: %w", s.DisplayName, err)
+				return
+			}
+			if data != nil {
+				mu.Lock()
+				for k, v := range data {
+					sloData[k] = v
+				}
+				err := bar.Add(1)
+				if err != nil {
+					log.Printf("Failed to update progress bar: %v", err)
+				}
+				mu.Unlock()
+			}
+		}(slo)
+	}
+
+	wg.Wait()
+	close(errChan)
+	err = bar.Finish()
+	if err != nil {
+		log.Printf("Failed to finish progress bar: %v", err)
+	}
+
+	if len(errChan) > 0 {
+		err = <-errChan
+		log.Panicf("Error in processing SLOs: %v", err)
+	}
+
+	generateExcelReport(sloData)
+
+	for _, msg := range warnMessages {
+		log.Println(msg)
+	}
+
 	log.Println("Report has been written to slo_report.xlsx")
 }
 
-func createClient[T interface{ Close() error }](ctx context.Context, factory func(ctx context.Context, opts ...option.ClientOption) (T, error)) T {
-	client, err := factory(ctx)
-	handleError(err, "Failed to create client")
-	return client
-}
+func ProcessSLO(ctx context.Context, client Vigil, slo *model.SLO) (map[string]*model.SLOData, error) {
+	var (
+		data = make(map[string]*model.SLOData)
+	)
 
-func processSLO(ctx context.Context, client *monitoring.MetricClient, slo *monitoringpb.ServiceLevelObjective) (jobResult, error) {
-	targetSLO := slo.GetGoal()
-	sli := slo.GetServiceLevelIndicator()
-
-	goodQuery := sli.GetRequestBased().GetGoodTotalRatio().GetGoodServiceFilter()
-	totalQuery := sli.GetRequestBased().GetGoodTotalRatio().GetTotalServiceFilter()
-
-	// range
-	if goodQuery == "" || totalQuery == "" {
-		goodQuery = sli.GetRequestBased().GetDistributionCut().GetRange().String()
-		totalQuery = sli.GetRequestBased().GetDistributionCut().GetDistributionFilter()
+	goodQuery, totalQuery, points, err := client.GetErrorBudgetTimeSeries(ctx, slo)
+	if err != nil {
+		if strings.Contains(err.Error(), "no data points found") {
+			warnMutex.Lock()
+			warnMessages = append(warnMessages, err.Error())
+			warnMutex.Unlock()
+			return nil, nil
+		}
+		return nil, err
 	}
 
-	result := jobResult{
-		key:        slo.GetDisplayName(),
-		targetSLO:  targetSLO,
-		goodQuery:  goodQuery,
-		totalQuery: totalQuery,
-	}
-
-	startTime := time.Now().UTC().Add(*window * -1).Unix()
-	endTime := time.Now().UTC().Unix()
-
-	req := &monitoringpb.ListTimeSeriesRequest{
-		Name:   "projects/" + *projectID,
-		Filter: fmt.Sprintf("select_slo_budget_fraction(%s)", slo.GetName()),
-		Interval: &monitoringpb.TimeInterval{
-			StartTime: &timestamppb.Timestamp{Seconds: startTime},
-			EndTime:   &timestamppb.Timestamp{Seconds: endTime},
-		},
-	}
-
-	iter := client.ListTimeSeries(ctx, req)
-	var points []float64
-
-	for {
-		ts, err := iter.Next()
-		if errors.Is(err, iterator.Done) {
+	var flagBelowThreshold bool // The error budget has never been below n% for m days
+	var flagNegative bool       // Error budget is a negative throughout the window
+	for _, point := range points {
+		if point >= *errorBudgetThreshold {
+			flagBelowThreshold = true
 			break
 		}
-		if err != nil {
-			return jobResult{}, fmt.Errorf("failed to get time series: %w", err)
-		}
+	}
+	flagNegative = utils.IsPercentNegative(points, 0.5)
 
-		for _, point := range ts.GetPoints() {
-			value := point.GetValue().GetDoubleValue()
-			if value <= *errorBudgetThreshold {
-				result.flag = true
-				break
-			}
-			points = append(points, value)
-		}
+	minBudget, avgBudget := utils.GetMinAvgErrorBudget(points)
+
+	data[slo.DisplayName] = &model.SLOData{
+		Flag:       flagBelowThreshold || flagNegative,
+		SLO:        slo.Goal,
+		GoodQuery:  goodQuery,
+		TotalQuery: totalQuery,
+		AvgBudget:  avgBudget,
+		MinBudget:  minBudget,
 	}
 
-	if len(points) == 0 {
-		return jobResult{}, fmt.Errorf("no data points found for SLO: %s", slo.GetDisplayName())
-	}
-
-	result.min, result.avg = getMinAvgErrorBudget(points)
-	return result, nil
-}
-
-func getMinAvgErrorBudget(points []float64) (minValue float64, avgValue float64) {
-	minValue = math.Inf(1)
-	avgValue = 0.0
-	for _, point := range points {
-		if point < minValue {
-			minValue = point
-		}
-		avgValue += point
-	}
-	return minValue, avgValue / float64(len(points))
+	return data, nil
 }
 
 func validateFlags() {
-	if *projectID == "" {
-		log.Panicf("--project id is required")
+	if *gcpProjectID == "" {
+		log.Panicf("--gcp-project id is required")
 	}
 	if *errorBudgetThreshold <= 0 || *errorBudgetThreshold >= 1 {
 		log.Panicf("--error-budget-threshold must be between 0 and 1")
@@ -157,9 +159,13 @@ func validateFlags() {
 	if *window <= 0 {
 		log.Panicf("--window must be positive duration")
 	}
+
+	if *cloudProvider != "gcp" {
+		log.Panicf("not supported cloud provider yet: %s", *cloudProvider)
+	}
 }
 
-func generateExcelReport(data map[string]*sloData) {
+func generateExcelReport(data map[string]*model.SLOData) {
 	f := excelize.NewFile()
 	defer func() {
 		err := f.Close()
@@ -187,7 +193,7 @@ func generateExcelReport(data map[string]*sloData) {
 	})
 	setSheetView(f)
 	setCellWithStyle(f, "A1", fmt.Sprintf("SLO Report for %s\nList of SLOs that have never been below %g%% in %g days...",
-		*projectID, *errorBudgetThreshold*100, window.Hours()/24), descriptionStyle)
+		*gcpProjectID, *errorBudgetThreshold*100, window.Hours()/24), descriptionStyle)
 	setCellWithStyle(f, "C2", "New SLO", highlightStyle)
 
 	headers := []string{"Name", "SLO", "New SLO", "SLI Min", "SLI Avg", "GoodQuery", "TotalQuery", "New GoodQuery?", "New TotalQuery?"}
@@ -198,14 +204,16 @@ func generateExcelReport(data map[string]*sloData) {
 	// データ設定
 	row := 3
 	for k, v := range data {
-		setCellValue(f, fmt.Sprintf("A%d", row), k)
-		setCellValue(f, fmt.Sprintf("B%d", row), v.SLO*100)
-		setCellWithStyle(f, fmt.Sprintf("C%d", row), 0, highlightStyle)
-		setCellValue(f, fmt.Sprintf("D%d", row), v.Min*100)
-		setCellValue(f, fmt.Sprintf("E%d", row), v.Avg*100)
-		setCellValue(f, fmt.Sprintf("F%d", row), v.GoodQuery)
-		setCellValue(f, fmt.Sprintf("G%d", row), v.TotalQuery)
-		row++
+		if v.Flag {
+			setCellValue(f, fmt.Sprintf("A%d", row), k)
+			setCellValue(f, fmt.Sprintf("B%d", row), v.SLO*100)
+			setCellWithStyle(f, fmt.Sprintf("C%d", row), 0, highlightStyle)
+			setCellValue(f, fmt.Sprintf("D%d", row), v.MinBudget*100)
+			setCellValue(f, fmt.Sprintf("E%d", row), v.AvgBudget*100)
+			setCellValue(f, fmt.Sprintf("F%d", row), v.GoodQuery)
+			setCellValue(f, fmt.Sprintf("G%d", row), v.TotalQuery)
+			row++
+		}
 	}
 
 	setCellWithStyle(f, "C2", "New SLO", highlightStyle)
@@ -261,151 +269,6 @@ func setCellWithStyle(f *excelize.File, cell string, value interface{}, styleID 
 
 func setCellValue(f *excelize.File, cell string, value interface{}) {
 	handleError(f.SetCellValue("Sheet1", cell, value), "Failed to set cell value")
-}
-
-func listSLOs(ctx context.Context, client *monitoring.ServiceMonitoringClient) []*monitoringpb.ServiceLevelObjective {
-	var slos []*monitoringpb.ServiceLevelObjective
-
-	services := client.ListServices(ctx, &monitoringpb.ListServicesRequest{
-		Parent: "projects/" + *projectID,
-	})
-	for {
-		service, err := services.Next()
-		if errors.Is(err, iterator.Done) {
-			break
-		}
-		if err != nil {
-			log.Panicf("Failed to list services: %v", err)
-		}
-
-		lSLOs := client.ListServiceLevelObjectives(ctx, &monitoringpb.ListServiceLevelObjectivesRequest{
-			Parent: service.GetName(),
-		})
-		for {
-			slo, err := lSLOs.Next()
-			if errors.Is(err, iterator.Done) {
-				break
-			}
-			if err != nil {
-				log.Panicf("Failed to list service level objectives: %v", err)
-			}
-
-			metrics, err := client.GetServiceLevelObjective(ctx, &monitoringpb.GetServiceLevelObjectiveRequest{
-				Name: slo.GetName(),
-			})
-			if err != nil {
-				log.Panicf("Failed to get service level objective: %v", err)
-			}
-
-			slos = append(slos, metrics)
-		}
-	}
-
-	return slos
-}
-
-func processSLOs(ctx context.Context, client *monitoring.MetricClient, slos []*monitoringpb.ServiceLevelObjective) map[string]*sloData {
-	var (
-		data         = make(map[string]*sloData)
-		warnMessages []string
-	)
-
-	bar := progressbar.Default(int64(len(slos)))
-	var wg sync.WaitGroup
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// fetch data for each slo
-	for i := 0; i < maxConcurrency; i++ {
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-
-			for slo := range jobCh {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					result, err := processSLO(ctx, client, slo)
-					if err != nil {
-						if strings.Contains(err.Error(), "no data points found") {
-							warnMessages = append(warnMessages, err.Error())
-							continue
-						}
-						select {
-						case errCh <- fmt.Errorf("SLO processing failed: %s: %w", slo.GetDisplayName(), err):
-						default:
-						}
-						return
-					}
-
-					barMutex.Lock()
-					err = bar.Add(1)
-					if err != nil {
-						log.Printf("Failed to add progress: %v", err)
-					}
-					barMutex.Unlock()
-
-					resultCh <- result
-				}
-			}
-		}()
-	}
-
-	go func() {
-		for _, slo := range slos {
-			select {
-			case jobCh <- slo:
-			case <-ctx.Done():
-				return
-			}
-		}
-		close(jobCh)
-	}()
-
-	go func() {
-		for {
-			select {
-			case e, ok := <-errCh:
-				if ok {
-					cancel()
-					err := bar.Finish()
-					if err != nil {
-						log.Printf("Failed to finish progress bar: %v", err)
-					}
-					log.Fatalf("Error in goroutine: %v", e)
-				}
-			case result, ok := <-resultCh:
-				if !ok {
-					return
-				}
-
-				dataMutex.Lock()
-
-				data[result.key] = &sloData{
-					Flag:       result.flag,
-					SLO:        result.targetSLO,
-					GoodQuery:  result.goodQuery,
-					TotalQuery: result.totalQuery,
-					Avg:        result.avg,
-					Min:        result.min,
-				}
-				dataMutex.Unlock()
-			}
-		}
-	}()
-
-	wg.Wait()
-	err := bar.Finish()
-	if err != nil {
-		log.Printf("Failed to finish progress bar: %v", err)
-	}
-	close(resultCh)
-	close(errCh)
-
-	return data
 }
 
 func handleError(err error, message string) {
