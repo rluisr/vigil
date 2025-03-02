@@ -124,15 +124,15 @@ func processSLO(ctx context.Context, client Vigil, slo *model.SLO) (map[string]*
 		return nil, err
 	}
 
-	var flagBelowThreshold bool // The error budget has never been below n% for m days
-	var flagNegative bool       // Error budget is a negative throughout the window
+	flagBelowThreshold := true // The error budget has never been below n% for m days
 	for _, point := range points {
-		if point >= *errorBudgetThreshold {
-			flagBelowThreshold = true
+		if point < *errorBudgetThreshold {
+			flagBelowThreshold = false
 			break
 		}
 	}
-	flagNegative = utils.IsPercentNegative(points, 0.5)
+
+	flagNegative := utils.IsPercentNegative(points, 0.5) // Error budget is a negative throughout the window
 
 	minBudget, avgBudget := utils.GetMinAvgErrorBudget(points)
 
