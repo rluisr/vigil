@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -83,6 +85,7 @@ func (c *Client) GetSLOs(_ context.Context) ([]*model.SLO, error) {
 }
 
 // GetErrorBudgetTimeSeries fetches error budget time series data for a given SLO.
+// It retries up to 5 times on HTTP 429 Too Many Requests with exponential backoff.
 func (c *Client) GetErrorBudgetTimeSeries(_ context.Context, slo *model.SLO) (string, string, []float64, error) {
 	ddSLO, ok := slo.SLI.(datadogV1.ServiceLevelObjective)
 	if !ok {
@@ -92,7 +95,41 @@ func (c *Client) GetErrorBudgetTimeSeries(_ context.Context, slo *model.SLO) (st
 	fromTs := time.Now().UTC().Add(c.Window * -1).Unix()
 	toTs := time.Now().UTC().Unix()
 
-	resp, _, err := c.api.GetSLOHistory(c.ctx, slo.Name, fromTs, toTs, *datadogV1.NewGetSLOHistoryOptionalParameters().WithApplyCorrection(true))
+	const maxRetries = 5
+
+	var (
+		resp datadogV1.SLOHistoryResponse
+		err  error
+	)
+
+	opts := datadogV1.NewGetSLOHistoryOptionalParameters().WithApplyCorrection(true)
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		var httpResp *http.Response
+		resp, httpResp, err = c.api.GetSLOHistory(c.ctx, slo.Name, fromTs, toTs, *opts)
+		if err != nil {
+			is429 := httpResp != nil && httpResp.StatusCode == http.StatusTooManyRequests
+			if httpResp != nil {
+				if closeErr := httpResp.Body.Close(); closeErr != nil {
+					log.Printf("Failed to close response body: %v", closeErr)
+				}
+			}
+			if !is429 {
+				return "", "", nil, fmt.Errorf("failed to get SLO history: %w", err)
+			}
+			delay := time.Duration(1<<attempt) * time.Second
+			log.Printf("Rate limited by Datadog API (429), retrying in %v (attempt %d/%d)...", delay, attempt+1, maxRetries)
+			time.Sleep(delay)
+			continue
+		}
+		if httpResp != nil {
+			if closeErr := httpResp.Body.Close(); closeErr != nil {
+				log.Printf("Failed to close response body: %v", closeErr)
+			}
+		}
+		break
+	}
+
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to get SLO history: %w", err)
 	}
