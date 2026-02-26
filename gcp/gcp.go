@@ -1,3 +1,4 @@
+// Package gcp provides a GCP Cloud Monitoring SLO client implementing the Vigil interface.
 package gcp
 
 import (
@@ -13,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// Client is a GCP Cloud Monitoring SLO client.
 type Client struct {
 	MonitoringClient     *monitoring.ServiceMonitoringClient
 	MetricClient         *monitoring.MetricClient
@@ -21,6 +23,7 @@ type Client struct {
 	Window               time.Duration
 }
 
+// NewClient creates a new GCP monitoring client.
 func NewClient(ctx context.Context, gcpProjectID string, errorBudgetThreshold float64, window time.Duration) (*Client, error) {
 	monitoringClient, err := monitoring.NewServiceMonitoringClient(ctx)
 	if err != nil {
@@ -41,10 +44,12 @@ func NewClient(ctx context.Context, gcpProjectID string, errorBudgetThreshold fl
 	}, nil
 }
 
+// GetProvider returns the GCP cloud provider identifier.
 func (c *Client) GetProvider() model.CloudProvider {
 	return model.CloudProviderGCP
 }
 
+// GetSLOs retrieves all SLOs from GCP Cloud Monitoring.
 func (c *Client) GetSLOs(ctx context.Context) ([]*model.SLO, error) {
 	var slos []*model.SLO
 
@@ -91,6 +96,7 @@ func (c *Client) GetSLOs(ctx context.Context) ([]*model.SLO, error) {
 	return slos, nil
 }
 
+// GetErrorBudgetTimeSeries fetches error budget time series data for a given SLO.
 func (c *Client) GetErrorBudgetTimeSeries(ctx context.Context, slo *model.SLO) (good string, total string, points []float64, err error) {
 	sli, ok := slo.SLI.(*monitoringpb.ServiceLevelIndicator)
 	if !ok {
